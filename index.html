@@ -48,9 +48,9 @@
         // Native backend tunnel to bypass browser CORS
         const PIPED_INSTANCES = window.location.hostname === 'localhost' ? [
             '/api',
-            'https://litetube-z0xx.onrender.com'
+            'https://litetube-z0xx.onrender.com/api'
         ] : [
-            'https://litetube-z0xx.onrender.com'
+            'https://litetube-z0xx.onrender.com/api'
         ];
 
         // Format duration helper (e.g. 1234 -> "20:34")
@@ -123,8 +123,7 @@
                     clearTimeout(suggestionTimeout.current);
                     suggestionTimeout.current = setTimeout(async () => {
                         try {
-                            const res = await fetch(`/api/suggest?q=${encodeURIComponent(val)}`);
-                            const data = await res.json();
+                            const data = await fetchFromPiped(`/suggest?q=${encodeURIComponent(val)}`);
                             setSuggestions(data || []);
                         } catch (err) {}
                     }, 150); // super fast debouncing
