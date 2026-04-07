@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>LiteTube - Premium Rebuild</title>
+    
+    <!-- Tailwind CSS (Zero Build Variant) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Roboto', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Google Fonts: Roboto -->
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    
+    <!-- React & ReactDOM (Zero Build) -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Babel for in-browser JSX compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-player@2.16.0/dist/ReactPlayer.js"></script>
+    <script crossorigin src="https://unpkg.com/screenfull@5.2.0/dist/screenfull.js"></script>
+    
+    <style>
+        body { font-family: 'Roboto', sans-serif; background-color: #0f0f0f; color: #fff; margin:0; padding:0; overflow-x: hidden; }
+        /* Hide scrollbar for Chrome, Safari and Opera */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        /* Hide scrollbar for IE, Edge and Firefox */
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // Native backend tunnel to bypass browser CORS
+        const PIPED_INSTANCES = [
+            '/api'
+        ];
+
+        // Format duration helper (e.g. 1234 -> "20:34")
+        const formatDuration = (seconds) => {
+            if (!seconds || seconds <= 0) return "0:00";
+            const h = Math.floor(seconds / 3600);
+            const m = justify(Math.floor((seconds % 3600) / 60));
+            const s = justify(seconds % 60);
+            return h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`;
+        };
+        const justify = (num) => num.toString().padStart(2, '0');
+
+        // ============================================
+        // 2. MAIN APPLICATION COMPONENT
+        // ============================================
+        const App = () => {
+            // Global State
+            const [view, setView] = useState('home'); // 'home' | 'watch' | 'history'
+            const [activeVideo, setActiveVideo] = useState(null);
+            const [isMiniPlayer, setIsMiniPlayer] = useState(false);
+            const [watchedTags, setWatchedTags] = useState([]);
+            const [watchedHistory, setWatchedHistory] = useState([]);
+            const [searchHistory, setSearchHistory] = useState([]);
+            const [isTheaterMode, setIsTheaterMode] = useState(false);
+            
+            // Live Feed State
+            const [feedItems, setFeedItems] = useState([]);
+            const [isLoading, setIsLoading] = useState(true);
+            const [searchQuery, setSearchQuery] = useState("");
+            const [suggestions, setSuggestions] = useState([]);
+            const [showSuggestions, setShowSuggestions] = useState(false);
+            const [videoStreamUrl, setVideoStreamUrl] = useState(null);
+            
+            const suggestionTimeout = useRef(null);
+
+            // Fetch from multiple fallbacks
+            const fetchFromPiped = async (endpoint) => {
+                for (let instance of PIPED_INSTANCES) {
+                    try {
+                        const res = await fetch(`${instance}${endpoint}`);
+                        if (res.ok) return await res.json();
+                    } catch (e) {
+                        console.log(`Instance ${instance} failed. Trying next...`);
+                    }
+                }
+                throw new Error("All decentralized APIs blocked.");
+            };
+
+            const loadHomeTrending = async (historyState = searchHistory) => {
+                setIsLoading(true);
+                try {
+                    let query = 'trending viral videos';
+                    if (historyState && historyState.length > 0) {
+                        // Personalize feed seamlessly using their last searched intent
+                        query = historyState[historyState.length - 1] + ' algorithm recommendation';
+                    }
+                    const data = await fetchFromPiped(`/search?q=${encodeURIComponent(query)}`);
+                    setFeedItems(data || []);
+                } catch (e) {
+                    alert("Failed to load feed. Backend proxy disconnected.");
+                }
+                setIsLoading(false);
+            };
+
+            const handleSearchInput = (e) => {
+                const val = e.target.value;
+                setSearchQuery(val);
+                if (val.trim()) {
+                    setShowSuggestions(true);
+                    clearTimeout(suggestionTimeout.current);
+                    suggestionTimeout.current = setTimeout(async () => {
+                        try {
+                            const res = await fetch(`/api/suggest?q=${encodeURIComponent(val)}`);
+                            const data = await res.json();
+                            setSuggestions(data || []);
+                        } catch (err) {}
+                    }, 150); // super fast debouncing
+                } else {
+                    setSuggestions([]);
+                    setShowSuggestions(false);
+                }
+            };
+
+            const executeSearch = async (e, queryOverride = null) => {
+                if (e) e.preventDefault();
+                const q = queryOverride || searchQuery;
+                if(!q.trim()) return loadHomeTrending();
+                
+                setShowSuggestions(false);
+                setIsLoading(true);
+                setView('home');
+                
+                // Track user history to enforce extreme personalization
+                const newHistory = Array.from(new Set([q, ...searchHistory])).slice(0, 50);
+                setSearchHistory(newHistory);
+                localStorage.setItem('litetube_searches', JSON.stringify(newHistory));
+
+                try {
+                    const data = await fetchFromPiped(`/search?q=${encodeURIComponent(q)}`);
+                    setFeedItems(data || []);
+                } catch (err) {
+                    alert("Search failed. Try again in a few seconds.");
+                }
+                setIsLoading(false);
+            };
+
+            // Theme Hook
+            const [theme, setTheme] = useState('dark');
+            const applyTheme = (t) => {
+                if (t === 'dark') document.documentElement.className = 'dark';
+                else if (t === 'light') document.documentElement.className = '';
+                else document.documentElement.className = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : '';
+            };
+            const toggleTheme = () => {
+                const map = {'dark': 'light', 'light': 'auto', 'auto': 'dark'};
+                const next = map[theme];
+                setTheme(next);
+                localStorage.setItem('litetube_theme', next);
+                applyTheme(next);
+            };
+
+            // Personalization Hook & Bootstrap
+            useEffect(() => {
+                const savedTags = localStorage.getItem('litetube_tags');
+                if(savedTags) setWatchedTags(JSON.parse(savedTags));
+                
+                const savedTheme = localStorage.getItem('litetube_theme') || 'dark';
+                setTheme(savedTheme);
+                applyTheme(savedTheme);
+                
+                const savedSearches = localStorage.getItem('litetube_searches');
+                const parsedSearches = savedSearches ? JSON.parse(savedSearches) : [];
+                setSearchHistory(parsedSearches);
+                
+                const savedHistory = localStorage.getItem('litetube_history');
+                if(savedHistory) setWatchedHistory(JSON.parse(savedHistory));
+
+                loadHomeTrending(parsedSearches); // Boot sequence
+            }, []);
+
+            const playVideo = async (video) => {
+                // Ensure proper ID mapping (Piped search returns url="/watch?v=123")
+                let videoId = video.url.split('v=')[1];
+                if (!videoId) return;
+
+                video.id = videoId; // attach flat ID
+                setActiveVideo(video);
+                setView('watch');
+                setIsMiniPlayer(false);
+                setVideoStreamUrl(null); // Reset while loading raw stream
+
+                try {
+                    const streamData = await fetchFromPiped(`/streams/${videoId}`);
+                    // Grab highest quality raw mp4
+                    const mp4Streams = streamData.videoStreams.filter(s => s.format === "MPEG-4" && s.videoOnly === false);
+                    if (mp4Streams.length > 0) {
+                        setVideoStreamUrl(mp4Streams[0].url);
+                    } else if (streamData.hls) {
+                        setVideoStreamUrl(streamData.hls);
+                    }
+                } catch (e) {
+                    console.log("Stream fetch failed. Fallback to iframe.");
+                    setVideoStreamUrl("fallback");
+                }
+
+                // Update personalization loosely based on uploader
+                const newTags = Array.from(new Set([...watchedTags, video.uploaderName]));
+                setWatchedTags(newTags.slice(-10)); // Keep last 10
+                localStorage.setItem('litetube_tags', JSON.stringify(newTags.slice(-10)));
+                
+                // Commit to physical watched history log
+                const curHistory = [video, ...watchedHistory.filter(v => v.url !== video.url)].slice(0, 100);
+                setWatchedHistory(curHistory);
+                localStorage.setItem('litetube_history', JSON.stringify(curHistory));
+                
+                // Fast auto-scroll to top for Sidebar Up Next clicks
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            };
+
+            const minimizePlayer = () => {
+                setView('home');
+                setIsMiniPlayer(true);
+            };
+
+            const closePlayer = () => {
+                setActiveVideo(null);
+                setIsMiniPlayer(false);
+            };
+
+            const playNextVideo = () => {
+                const streams = feedItems.filter(v => v.type === "stream" && v.url !== activeVideo?.url);
+                if (streams.length > 0) playVideo(streams[0]);
+            };
+
+            // ============================================
+            // 3. PERSISTENT HEADER NAV
+            // ============================================
+            const renderHeader = () => (
+                <div className="fixed top-0 left-0 w-full h-14 bg-white dark:bg-[#0f0f0f] flex items-center justify-between px-4 z-50">
+                    <div className="flex items-center gap-4 cursor-pointer" onClick={() => setView('home')}>
+                        <button className="text-black dark:text-white hidden sm:block">
+                            <svg className="w-6 h-6 fill-current" viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg>
+                        </button>
+                        <div className="flex items-center gap-1 font-bold text-xl text-black dark:text-white tracking-tight">
+                            <div className="bg-red-600 text-white rounded-lg px-2 flex items-center justify-center font-bold">L</div>
+                            LiteTube
+                        </div>
+                    </div>
+                    
+                    <form onSubmit={(e) => executeSearch(e)} className="flex-1 max-w-[600px] flex items-center gap-2 px-4 sm:px-10 relative">
+                        <div className="flex-1 flex items-center bg-gray-100 dark:bg-[#121212] border border-gray-300 dark:border-zinc-800 rounded-full overflow-hidden focus-within:border-blue-500 ml-4 lg:ml-0">
+                            <div className="hidden sm:block pl-4 text-gray-500"><svg className="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></div>
+                            <input value={searchQuery} onChange={handleSearchInput} onFocus={() => searchQuery.trim() && setShowSuggestions(true)} onBlur={() => setTimeout(() => setShowSuggestions(false), 200)} type="text" placeholder="Search absolute raw streams..." className="w-full bg-transparent outline-none px-4 py-2 text-gray-900 dark:text-white" />
+                            <button type="submit" className="bg-gray-200 dark:bg-zinc-800 px-5 py-2 border-l border-gray-300 dark:border-zinc-800 hover:bg-gray-300 dark:hover:bg-zinc-700 transition">
+                                <svg className="w-5 h-5 fill-gray-600 dark:fill-gray-300" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                            </button>
+                        </div>
+                        {showSuggestions && suggestions.length > 0 && (
+                            <div className="absolute top-full left-4 sm:left-10 right-4 sm:right-10 mt-1 bg-white dark:bg-zinc-900 border border-gray-200 dark:border-zinc-800 rounded-xl shadow-2xl py-3 z-50">
+                                {suggestions.map((sug, i) => (
+                                    <div key={i} onClick={() => { setSearchQuery(sug); executeSearch(null, sug); }} className="px-4 py-1.5 hover:bg-gray-100 dark:hover:bg-zinc-800 cursor-pointer text-black dark:text-white flex items-center gap-3 font-medium">
+                                        <svg className="w-4 h-4 fill-gray-500" viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+                                        <span>{sug}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </form>
+                    
+                    <button onClick={toggleTheme} className="bg-gray-100 dark:bg-zinc-800 w-10 h-10 rounded-full flex items-center justify-center hover:bg-gray-200 dark:hover:bg-zinc-700 transition shrink-0 hidden sm:flex">
+                        {theme === 'dark' ? '🌙' : theme === 'light' ? '☀️' : '🔄'}
+                    </button>
+                    <button onClick={() => setView('history')} className="bg-gray-100 dark:bg-zinc-800 w-10 h-10 rounded-full items-center justify-center hover:bg-gray-200 dark:hover:bg-zinc-700 transition shrink-0 hidden sm:flex ml-2">
+                        <svg className="w-5 h-5 fill-black dark:fill-white" viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+                    </button>
+
+                    <div className="flex items-center gap-4 ml-4">
+                        <div className="w-8 h-8 rounded-full bg-blue-500 text-white flex items-center justify-center font-bold text-sm cursor-pointer">S</div>
+                    </div>
+                </div>
+            );
+
+            // ============================================
+            // 4. HOME FEED GRID
+            // ============================================
+            const renderHomeFeed = () => {
+                // Algorithm: Surface things related to 'watchedTags'
+                const sortedFeed = [...feedItems].sort((a, b) => {
+                    const aScore = watchedTags.includes(a.uploaderName) ? 1 : 0;
+                    const bScore = watchedTags.includes(b.uploaderName) ? 1 : 0;
+                    return bScore - aScore;
+                });
+
+                return (
+                    <div className="pt-16 pb-20 w-full min-h-screen bg-white dark:bg-[#0f0f0f] px-4 sm:px-6">
+                        
+                        {/* Tags Pill Navigation */}
+                        <div className="flex gap-3 overflow-x-auto no-scrollbar pb-6 shrink-0 mt-4">
+                            <button onClick={() => { setSearchQuery(""); loadHomeTrending(); }} className="bg-black dark:bg-white text-white dark:text-black px-3 py-1.5 rounded-lg text-sm font-medium whitespace-nowrap">All</button>
+                            {watchedTags.length > 0 && watchedTags.map(tag => (
+                                <button key={tag} onClick={() => { setSearchQuery(tag); executeSearch(null, tag); }} className="bg-gray-100 hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-gray-900 dark:text-gray-100 px-3 py-1.5 rounded-lg text-sm transition font-medium capitalize whitespace-nowrap">{tag}</button>
+                            ))}
+                            <button onClick={() => loadHomeTrending()} className="bg-gray-100 dark:bg-zinc-800 text-gray-900 dark:text-gray-100 px-3 py-1.5 rounded-lg text-sm transition font-medium whitespace-nowrap">New to you</button>
+                            <button onClick={() => { setSearchQuery("live"); executeSearch(null, "live"); }} className="bg-gray-100 dark:bg-zinc-800 text-gray-900 dark:text-gray-100 px-3 py-1.5 rounded-lg text-sm transition font-medium whitespace-nowrap">Live</button>
+                        </div>
+
+                        {isLoading ? (
+                            <div className="flex justify-center items-center mt-20 text-gray-500">
+                                <svg className="animate-spin h-10 w-10 text-red-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-10 max-w-[2000px] mx-auto">
+                                {sortedFeed.filter(v => v.type === 'stream').map(video => (
+                                    <div key={video.url} onClick={() => playVideo(video)} className="flex flex-col cursor-pointer group">
+                                        <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-gray-200 dark:bg-zinc-800">
+                                            <img src={video.thumbnail} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                                            <div className="absolute bottom-1 right-1 bg-black/80 font-bold text-white text-xs px-1 py-0.5 rounded">
+                                                {formatDuration(video.duration)}
+                                            </div>
+                                            {/* Resume progress bar mock */}
+                                            {watchedTags.includes(video.uploaderName) && (
+                                                <div className="absolute bottom-0 left-0 h-1 bg-red-600 w-[80%] z-10 transition-all"></div>
+                                            )}
+                                        </div>
+                                        <div className="flex mt-3 gap-3 pr-6">
+                                            <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-pink-500 to-indigo-500 shrink-0 flex items-center justify-center font-bold text-white shadow">
+                                                {video.uploaderName.charAt(0)}
+                                            </div>
+                                            <div className="flex flex-col">
+                                                <h3 className="text-[15px] font-semibold text-gray-900 dark:text-white leading-tight line-clamp-2">
+                                                    {video.title}
+                                                </h3>
+                                                <p className="text-[13px] text-gray-500 dark:text-[#aaaaaa] mt-0.5 hover:text-gray-900 dark:hover:text-white transition flex items-center gap-1">
+                                                    {video.uploaderName}
+                                                    {video.uploaderVerified && <svg className="w-3 h-3 fill-gray-500" viewBox="0 0 24 24"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm-2 15l-5-5 1.4-1.4 3.6 3.6 7.6-7.6L19 8l-9 9z"/></svg>}
+                                                </p>
+                                                <p className="text-[13px] text-gray-500 dark:text-[#aaaaaa]">
+                                                    {video.views ? video.views.toLocaleString() : 'Live'} views • {video.uploadedDate || 'Recently'}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                );
+            };
+
+            // ============================================
+            // 5. WATCH & PLAYBACK PAGE
+            // ============================================
+            const renderWatchPage = () => {
+                if (!activeVideo) return null;
+                
+                return (
+                    <div className={`pt-14 w-full min-h-screen bg-[#0f0f0f] ${isTheaterMode ? 'px-0' : 'px-4 lg:px-24 xl:px-32 flex flex-col lg:flex-row gap-6'}`}>
+                        {/* Primary View */}
+                        <div className={`flex flex-col mt-6 ${isTheaterMode ? 'w-full' : 'flex-1 min-w-0'}`}>
+                            {/* Player Wrapper securing 16:9 natively and aggressively isolating from YT embeds */}
+                            <div className={`relative w-full aspect-[16/9] bg-black ${isTheaterMode ? '' : 'rounded-xl overflow-hidden'} flex items-center justify-center`}>
+                                {/* COMPLETE YOUTUBE CONTROL REPLICA */}
+                                {activeVideo && (
+                                    <NativeYoutubePlayer activeVideo={activeVideo} nextVideo={playNextVideo} />
+                                )}
+                            </div>
+                            
+                            {/* Metadata under player */}
+                            <div className={`mt-4 mb-6 ${isTheaterMode ? 'px-4 lg:px-24 xl:px-32' : ''}`}>
+                                <h1 className="text-xl font-bold text-white mb-2">{activeVideo.title}</h1>
+                                <div className="flex flex-col sm:flex-row justify-between gap-4">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-10 h-10 rounded-full bg-indigo-600 overflow-hidden"><img src={activeVideo.uploaderAvatar} className="w-full h-full object-cover" /></div>
+                                        <div className="flex flex-col">
+                                            <span className="text-white font-bold text-sm tracking-tight flex items-center gap-1">{activeVideo.uploaderName} {activeVideo.uploaderVerified && <svg className="w-3 h-3 fill-gray-400" viewBox="0 0 24 24"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm-2 15l-5-5 1.4-1.4 3.6 3.6 7.6-7.6L19 8l-9 9z"/></svg>}</span>
+                                            <span className="text-gray-400 text-xs">Subscribed</span>
+                                        </div>
+                                        <button className="ml-4 bg-white text-black px-4 py-2 rounded-full font-bold text-sm hover:bg-gray-200 transition">Subscribe</button>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <button className="bg-zinc-800 hover:bg-zinc-700 text-white px-4 py-2 rounded-full font-bold text-sm flex items-center transition">
+                                            <span>👍 150K</span><div className="w-[1px] h-4 bg-white/20 mx-3"></div><span>👎</span>
+                                        </button>
+                                        <button className="bg-zinc-800 hover:bg-zinc-700 text-white px-4 py-2 rounded-full font-bold text-sm transition items-center gap-2 flex">
+                                            <svg className="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M15 5.63 20.66 12 15 18.37V14h-1c-3.96 0-7.14 1-9.75 3.09 1.84-4.07 5.11-6.4 9.89-7.1l.86-.13V5.63M14 3v6C6.22 10.13 3.11 15.33 2 21c2.78-3.97 6.44-6 12-6v6l8-9-8-9z"/></svg>
+                                            Share
+                                        </button>
+                                        <button onClick={() => setIsTheaterMode(!isTheaterMode)} className="bg-zinc-800 hover:bg-zinc-700 text-white px-4 py-2 rounded-full font-bold text-sm transition hidden md:block">
+                                            {isTheaterMode ? 'Default View' : 'Theater Mode'}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="mt-4 bg-zinc-800/80 rounded-xl p-3 text-sm font-medium hover:bg-zinc-800 cursor-pointer transition">
+                                    <span className="font-bold">{activeVideo.views ? activeVideo.views.toLocaleString() : 'A lot of'} views • {activeVideo.uploadedDate}</span>
+                                    <p className="mt-1 text-gray-200 break-words whitespace-pre-wrap">{activeVideo.shortDescription || "No description provided."}</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Sidebar "Up Next" feed */}
+                        <div className={`hidden lg:flex flex-col w-[350px] xl:w-[400px] shrink-0 gap-3 mt-6 ${isTheaterMode ? 'px-4 lg:px-24 xl:px-32 mt-2 w-full max-w-[1000px] xl:max-w-none' : ''}`}>
+                            {feedItems.filter(v => v.url !== activeVideo.url && v.type === "stream").slice(0,10).map(video => (
+                                <div key={video.url} onClick={() => playVideo(video)} className="flex gap-2 cursor-pointer group">
+                                    <div className="w-[168px] aspect-video rounded-xl bg-zinc-800 relative shrink-0 overflow-hidden">
+                                        <img src={video.thumbnail} className="w-full h-full object-cover group-hover:scale-105 transition" />
+                                        <div className="absolute bottom-1 right-1 bg-black/80 font-bold text-white text-xs px-1 rounded">{formatDuration(video.duration)}</div>
+                                    </div>
+                                    <div className="flex flex-col py-0.5 pr-2">
+                                        <span className="text-sm font-semibold text-white line-clamp-2 leading-tight group-hover:text-blue-400">{video.title}</span>
+                                        <span className="text-xs text-gray-400 mt-1">{video.uploaderName}</span>
+                                        <span className="text-xs text-gray-400">{video.views ? video.views.toLocaleString() : 'Live'} views</span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                );
+            };
+
+            // ============================================
+            // 6. HISTORY DASHBOARD
+            // ============================================
+            const renderHistory = () => (
+                <div className="pt-20 pb-20 w-full min-h-screen bg-white dark:bg-[#0f0f0f] px-4 sm:px-10 max-w-[1000px] mx-auto">
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
+                        <h1 className="text-2xl font-bold text-black dark:text-white">Watch history</h1>
+                        <div className="flex gap-4">
+                            <button onClick={() => { setWatchedHistory([]); localStorage.removeItem('litetube_history'); }} className="text-sm font-bold bg-transparent text-gray-900 dark:text-gray-100 px-4 py-2 rounded-full hover:bg-gray-200 dark:hover:bg-zinc-800 transition">Clear watch history</button>
+                            <button onClick={() => { setSearchHistory([]); localStorage.removeItem('litetube_searches'); }} className="text-sm font-bold bg-transparent text-gray-900 dark:text-gray-100 px-4 py-2 rounded-full hover:bg-gray-200 dark:hover:bg-zinc-800 transition">Clear search history</button>
+                        </div>
+                    </div>
+                    {watchedHistory.length === 0 ? (
+                        <div className="text-gray-500 mt-10">This list has no videos.</div>
+                    ) : (
+                        <div className="flex flex-col gap-6">
+                            {watchedHistory.map((video, idx) => (
+                                <div key={idx} onClick={() => playVideo(video)} className="flex gap-4 w-full cursor-pointer group relative">
+                                    <div className="w-[160px] sm:w-[246px] aspect-video bg-zinc-800 rounded-xl overflow-hidden relative shrink-0">
+                                        <img src={video.thumbnail} className="w-full h-full object-cover group-hover:scale-105 transition duration-300" />
+                                        <div className="absolute bottom-1 right-1 bg-black/80 font-bold text-white text-xs px-1 rounded">{formatDuration(video.duration)}</div>
+                                    </div>
+                                    <div className="flex flex-col pt-1 pr-12 min-w-0">
+                                        <h3 className="text-base sm:text-lg font-medium text-black dark:text-white line-clamp-2 leading-snug">{video.title}</h3>
+                                        <div className="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mt-1 flex flex-col sm:flex-row sm:items-center sm:gap-1 truncate">
+                                            <span className="truncate">{video.uploaderName}</span>
+                                            <span className="hidden sm:inline">•</span>
+                                            <span>{video.views ? video.views.toLocaleString() : 'Live'} views</span>
+                                        </div>
+                                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-2 line-clamp-1 sm:line-clamp-2 hidden md:block">
+                                            {video.shortDescription}
+                                        </p>
+                                    </div>
+                                    <button onClick={(e) => { e.stopPropagation(); const nh = watchedHistory.filter((v, i) => i !== idx); setWatchedHistory(nh); localStorage.setItem('litetube_history', JSON.stringify(nh)); }} className="absolute right-0 top-0 w-10 h-10 rounded-full hover:bg-gray-200 dark:hover:bg-zinc-800 flex items-center justify-center transition sm:opacity-0 group-hover:opacity-100 z-10">
+                                        <svg className="w-6 h-6 fill-black dark:fill-white" viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+
+            // ============================================
+            // 7. GLOBAL PIP MINI-PLAYER (Floating Overlay)
+            // ============================================
+            const renderMiniPlayer = () => {
+                if (!isMiniPlayer || !activeVideo) return null;
+
+                return (
+                    <div className="fixed bottom-16 sm:bottom-6 right-0 sm:right-6 w-full sm:w-80 bg-white dark:bg-zinc-900 shadow-2xl sm:rounded-lg overflow-hidden z-50 flex sm:flex-col border border-gray-200 dark:border-gray-800 transition-transform hover:-translate-y-1">
+                        <div className="w-32 sm:w-full aspect-video relative bg-black shrink-0 cursor-pointer overflow-hidden" onClick={() => setView('watch')}>
+                            {videoStreamUrl && videoStreamUrl !== "fallback" ? (
+                                <video src={videoStreamUrl} muted autoPlay className="w-full h-full object-cover pointer-events-none" poster={activeVideo.thumbnail}></video>
+                            ) : (
+                                <img src={activeVideo.thumbnail} className="w-full h-full object-cover" />
+                            )}
+                        </div>
+                        <div className="flex-1 flex items-center justify-between p-3 shrink-0 min-w-0">
+                            <div className="flex flex-col truncate pr-2 cursor-pointer" onClick={() => setView('watch')}>
+                                <span className="text-sm font-bold text-gray-900 dark:text-white truncate">{activeVideo.title}</span>
+                                <span className="text-xs text-gray-500 dark:text-gray-400 truncate">{activeVideo.uploaderName}</span>
+                            </div>
+                            <div className="flex items-center gap-3 text-gray-600 dark:text-gray-300 ml-auto shrink-0">
+                                <button onClick={() => playVideo(activeVideo)} className="hover:text-black dark:hover:text-white px-2">
+                                    <svg className="w-6 h-6 fill-current" viewBox="0 0 24 24"><path d="M19 4H5c-1.11 0-2 .9-2 2v12c0 1.1.89 2 2 2h4v-2H5V8h14v10h-4v2h4c1.1 0 2-.9 2-2V6c0-1.1-.89-2-2-2zm-7 9H8v5h4v-5z"/></svg>
+                                </button>
+                                <button onClick={closePlayer} className="hover:text-black dark:hover:text-white text-2xl font-light">×</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            // Mobile specific bottom bar
+            const renderMobileNav = () => (
+                <div className="sm:hidden fixed bottom-0 left-0 w-full h-12 bg-white dark:bg-[#0f0f0f] border-t border-gray-200 dark:border-zinc-800 flex items-center justify-around z-40">
+                    <button onClick={() => setView('home')} className={`flex flex-col items-center gap-1 ${view === 'home' ? 'text-black dark:text-white' : 'text-gray-500'}`}>
+                        <svg className="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+                        <span className="text-[10px]">Home</span>
+                    </button>
+                    <button onClick={() => setView('history')} className={`flex flex-col items-center gap-1 ${view === 'history' ? 'text-black dark:text-white' : 'text-gray-500'}`}>
+                        <svg className="w-5 h-5 fill-current" viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
+                        <span className="text-[10px]">History</span>
+                    </button>
+                </div>
+            );
+
+            return (
+                <div className="w-full relative min-h-screen">
+                    {renderHeader()}
+                    {view === 'home' && renderHomeFeed()}
+                    {view === 'watch' && renderWatchPage()}
+                    {view === 'history' && renderHistory()}
+                    {renderMiniPlayer()}
+                    {renderMobileNav()}
+                </div>
+            );
+        }
+
+        const NativeYoutubePlayer = ({ activeVideo, nextVideo }) => {
+            const playerRef = useRef(null);
+            const wrapperRef = useRef(null);
+            const [playing, setPlaying] = useState(true);
+            const [volume, setVolume] = useState(1);
+            const [muted, setMuted] = useState(false);
+            const [played, setPlayed] = useState(0);
+            const [playedSeconds, setPlayedSeconds] = useState(0);
+            const [duration, setDuration] = useState(0);
+            const [isControlsVisible, setIsControlsVisible] = useState(true);
+            const [isFullscreen, setIsFullscreen] = useState(false);
+            
+            const [autoPlayOn, setAutoPlayOn] = useState(false);
+            const [ccEnabled, setCcEnabled] = useState(false);
+            const [playbackRate, setPlaybackRate] = useState(1);
+            const [showSettings, setShowSettings] = useState(false);
+            
+            const ReactPlayer = window.ReactPlayer;
+            
+            const controlsTimeout = useRef(null);
+
+            const handleMouseMove = () => {
+                setIsControlsVisible(true);
+                clearTimeout(controlsTimeout.current);
+                controlsTimeout.current = setTimeout(() => {
+                    if (playing) setIsControlsVisible(false);
+                }, 3000);
+            };
+
+            const togglePlay = () => setPlaying(!playing);
+            const toggleMute = () => { if(volume === 0) setVolume(1); setMuted(!muted); };
+            const toggleFullscreen = () => {
+                if (window.screenfull && window.screenfull.isEnabled) {
+                    window.screenfull.toggle(wrapperRef.current);
+                }
+            };
+            
+            const handleSeek = (e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                const pos = (e.clientX - rect.left) / rect.width;
+                playerRef.current.seekTo(pos);
+            };
+
+            useEffect(() => {
+                if (window.screenfull && window.screenfull.isEnabled) {
+                    window.screenfull.on('change', () => setIsFullscreen(window.screenfull.isFullscreen));
+                }
+            }, []);
+
+            return (
+                <div ref={wrapperRef} 
+                     className="absolute inset-0 w-full h-full bg-black group overflow-hidden flex items-center justify-center"
+                     onMouseMove={handleMouseMove}
+                     onMouseLeave={() => playing && setIsControlsVisible(false)}>
+                    
+                    {ReactPlayer && (
+                        <div className="absolute inset-0 pointer-events-none">
+                            <ReactPlayer
+                                ref={playerRef}
+                                url={`https://www.youtube.com/watch?v=${activeVideo.id}`}
+                                playing={playing}
+                                volume={volume}
+                                muted={muted}
+                                playbackRate={playbackRate}
+                                width="100%"
+                                height="100%"
+                                controls={false} // Override native frame!
+                                onProgress={(p) => { setPlayed(p.played); setPlayedSeconds(p.playedSeconds); }}
+                                onDuration={(d) => setDuration(d)}
+                                onEnded={() => { if(autoPlayOn && nextVideo) nextVideo(); else setPlaying(false); }}
+                                onPause={() => setPlaying(false)}
+                                onPlay={() => setPlaying(true)}
+                                config={{ youtube: { playerVars: { modestbranding: 1, rel: 0, showinfo: 0, iv_load_policy: 3, fs: 0, disablekb: 1, cc_load_policy: ccEnabled ? 1 : 0 } } }}
+                                style={{ pointerEvents: 'none' }} // Crucial to prevent IFRAME stealing focus!
+                            />
+                        </div>
+                    )}
+                    
+                    {/* Click Catcher overlay */}
+                    <div className="absolute inset-0 z-10 cursor-pointer" onClick={togglePlay}>
+                        {!playing && (
+                            <div className="absolute inset-0 flex items-center justify-center">
+                                <div className="w-16 h-16 bg-black/60 rounded-full flex items-center justify-center text-white backdrop-blur-sm shadow-xl">
+                                    <svg className="w-8 h-8 ml-1" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                    
+                    {/* Custom Perfect Gradient Controls Zone */}
+                    <div className={`absolute bottom-0 left-0 w-full px-3 pb-2 pt-16 bg-gradient-to-t from-black/80 via-black/40 to-transparent z-20 flex flex-col transition-opacity duration-300 ${isControlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                        {/* YouTube Style Scrubber */}
+                        <div className="w-full h-1.5 bg-white/20 hover:h-2 transition-all cursor-pointer relative mb-2" onMouseDown={handleSeek}>
+                            {/* Buffered Track (Mocked slightly behind played for UX speed) */}
+                            <div className="absolute top-0 left-0 h-full bg-white/40" style={{ width: `${Math.min(played * 100 + 10, 100)}%` }}></div>
+                            {/* Played Track */}
+                            <div className="absolute top-0 left-0 h-full bg-red-600 shadow shadow-red-600/50" style={{ width: `${played * 100}%` }}>
+                                <div className="absolute -right-2 top-1/2 -translate-y-1/2 w-4 h-4 bg-red-600 rounded-full opacity-0 hover:opacity-100 group-hover:opacity-100 transition shadow-sm scale-0 group-hover:scale-100"></div>
+                            </div>
+                        </div>
+
+                        {/* Control Bar Actions */}
+                        <div className="flex items-center justify-between w-full h-10 gap-4">
+                            <div className="flex items-center gap-1">
+                                {/* Play/Pause */}
+                                <button onClick={togglePlay} className="w-10 h-10 flex items-center justify-center text-white hover:text-white/80 transition transform active:scale-95">
+                                    {playing ? <svg className="w-7 h-7 fill-current" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                                             : <svg className="w-7 h-7 fill-current" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>}
+                                </button>
+                                {/* Next Track Mock */}
+                                <button onClick={() => nextVideo && nextVideo()} className="w-10 h-10 flex items-center justify-center text-white hover:text-white/80 transition">
+                                    <svg className="w-6 h-6 fill-current" viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+                                </button>
+                                {/* Volume Slider System */}
+                                <div className="flex items-center group/vol">
+                                    <button onClick={toggleMute} className="w-10 h-10 flex items-center justify-center text-white hover:text-white/80 transition">
+                                        {muted || volume === 0 ? <svg className="w-6 h-6 fill-current" viewBox="0 0 24 24"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+                                                    : <svg className="w-6 h-6 fill-current" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>}
+                                    </button>
+                                    <div className="w-0 group-hover/vol:w-16 overflow-hidden transition-all duration-300 flex items-center h-full">
+                                        <input type="range" min={0} max={1} step="any" value={muted ? 0 : volume} onChange={e => {setVolume(parseFloat(e.target.value)); setMuted(false);}} className="w-16 h-1 bg-white/30 rounded appearance-none cursor-pointer" />
+                                    </div>
+                                </div>
+                                {/* Timestamps */}
+                                <div className="text-white text-[13px] font-medium tracking-wide mx-2 flex items-center shadow-black/50">
+                                    <span>{activeVideo.duration === 0 ? "Live" : formatDuration(Math.floor(playedSeconds))}</span>
+                                    <span className="mx-1 text-white/70">/</span>
+                                    <span className="text-white/70">{activeVideo.duration === 0 ? "Live" : formatDuration(activeVideo.duration)}</span>
+                                </div>
+                            </div>
+                            
+                            {/* Right Trays */}
+                            <div className="flex items-center gap-1">
+                                <button onClick={() => setAutoPlayOn(!autoPlayOn)} className="w-10 h-10 flex items-center justify-center text-white hover:text-white/80 transition relative group/tt">
+                                    <span className="opacity-0 group-hover/tt:opacity-100 absolute -top-8 bg-black/80 px-2 py-1 rounded text-xs whitespace-nowrap transition">AutoPlay is {autoPlayOn ? 'On' : 'Off'}</span>
+                                    <div className={`w-8 h-4 rounded-full border border-white/50 flex flex-row items-center px-0.5 transition ${autoPlayOn ? 'bg-red-600 justify-end' : 'bg-white/20 justify-start'}`}><div className="w-3 h-3 bg-white rounded-full transition-transform"></div></div>
+                                </button>
+                                <button onClick={() => setCcEnabled(!ccEnabled)} className="w-10 h-10 flex items-center justify-center text-white hover:text-white/80 transition relative group/tt">
+                                    <span className="opacity-0 group-hover/tt:opacity-100 absolute -top-8 bg-black/80 px-2 py-1 rounded text-xs transition">Subtitles/CC (c)</span>
+                                    <svg className="w-6 h-6 fill-current" viewBox="0 0 24 24"><path d="M19 4H5c-1.11 0-2 .9-2 2v12c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1.5c0 .28-.22.5-.5.5h-3c-.28 0-.5-.22-.5-.5v-4c0-.28.22-.5.5-.5h3c.28 0 .5.22.5.5V11zm7 0h-1.5v-.5h-2v3h2V13H18v1.5c0 .28-.22.5-.5.5h-3c-.28 0-.5-.22-.5-.5v-4c0-.28.22-.5.5-.5h3c.28 0 .5.22.5.5V11z" /></svg>
+                                    {ccEnabled && <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 w-[18px] h-[3px] bg-red-600 rounded"></div>}
+                                </button>
+                                <div className="relative">
+                                    <button onClick={() => setShowSettings(!showSettings)} className="w-10 h-10 flex items-center justify-center text-white hover:text-white/80 transition transform hover:rotate-90">
+                                        <svg className="w-6 h-6 fill-current" viewBox="0 0 24 24"><path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.06-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.73,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.06,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.43-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.49-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/></svg>
+                                    </button>
+                                    {showSettings && (
+                                        <div className="absolute bottom-12 right-0 bg-zinc-900 rounded-xl py-2 w-48 shadow-2xl border border-zinc-700">
+                                            <div className="px-4 py-2 font-semibold text-xs text-gray-400 border-b border-zinc-800 uppercase tracking-widest">Playback Speed</div>
+                                            {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map(rate => (
+                                                <div key={rate} onClick={() => { setPlaybackRate(rate); setShowSettings(false); }} className={`px-5 py-2 cursor-pointer hover:bg-zinc-800 flex items-center justify-between text-sm ${playbackRate === rate ? 'text-white font-bold' : 'text-gray-300'}`}>
+                                                    {rate === 1 ? 'Normal' : `${rate}x`}
+                                                    {playbackRate === rate && <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg>}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                                <button onClick={toggleFullscreen} className="w-10 h-10 flex items-center justify-center text-white hover:text-white/80 transition ml-2">
+                                    {isFullscreen ? <svg className="w-6 h-6 fill-current" viewBox="0 0 24 24"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
+                                                  : <svg className="w-7 h-7 fill-current" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
