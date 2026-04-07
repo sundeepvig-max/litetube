@@ -5,8 +5,9 @@ import urllib.parse
 from urllib.parse import urlparse, parse_qs
 import json
 import re
+import os
 
-PORT = 3000
+PORT = int(os.environ.get("PORT", 3000))
 
 class ProxyHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
